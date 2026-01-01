@@ -4,6 +4,7 @@ use egui::viewport::{ViewportCommand, WindowLevel};
 use std::time::Duration;
 
 use crate::capture::{RgbaImage, capture_region};
+use crate::clipboard;
 use crate::mode::Mode;
 
 #[derive(Default)]
@@ -33,6 +34,7 @@ impl App {
     }
 
     pub fn exit_overlay(&mut self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
         ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::Normal));
@@ -41,7 +43,6 @@ impl App {
 
     pub fn cancel_overlay(&mut self, ctx: &egui::Context) {
         self.mode = Mode::Idle;
-        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         self.exit_overlay(ctx);
     }
 
@@ -95,33 +96,32 @@ impl eframe::App for App {
             self.image_loaders_installed = true;
         }
 
-        // PendingCapture：这一段期间不画任何东西（全透明窗口），等合成器刷新后截图
-        if let Mode::PendingCapture { rect_px, hidden_at } = self.mode {
-            // 驱动帧循环
-            ctx.request_repaint_after(Duration::from_millis(16));
-
-            if hidden_at.elapsed() < Duration::from_millis(Self::CAPTURE_DELAY_MS) {
-                return;
-            }
-
-            match capture_region(rect_px) {
-                Ok(img) => {
-                    self.screenshot = Some(img);
-                    self.texture = None;
-                }
-                Err(e) => eprintln!("capture failed: {e:?}"),
-            }
-
-            self.mode = Mode::Idle;
-            self.exit_overlay(ctx);
-            return;
-        }
-
         match self.mode {
             Mode::Idle => self.idle_ui(ctx),
             Mode::Selecting { .. } => self.overlay_selecting_ui(ctx),
             Mode::Selected { .. } => self.overlay_selected_ui(ctx),
-            Mode::PendingCapture { .. } => {}
+            Mode::PendingCapture { rect_px, hidden_at } => {
+                // 驱动帧循环
+                ctx.request_repaint_after(Duration::from_millis(16));
+
+                if hidden_at.elapsed() < Duration::from_millis(Self::CAPTURE_DELAY_MS) {
+                    return;
+                }
+
+                match capture_region(rect_px) {
+                    Ok(img) => {
+                        if let Err(e) = clipboard::copy_image(&img) {
+                            eprintln!("copy to clipboard failed: {e}");
+                        }
+                        self.screenshot = Some(img);
+                        self.texture = None;
+                    }
+                    Err(e) => eprintln!("capture failed: {e:?}"),
+                }
+
+                self.mode = Mode::Idle;
+                self.exit_overlay(ctx);
+            }
         }
     }
 }

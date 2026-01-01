@@ -8,7 +8,7 @@ image = { version = "0.25.9", default-features = false, features = ["png"] }
 anyhow = "1.0.100"
 eframe = "0.33.3"
 egui_extras = { version = "0.33.3", features = ["all_loaders"] }
-
+arboard = "3.6.1"
 
 # ---------- Linux X11 ----------
 [target.'cfg(all(unix, not(target_os="macos")))'.dependencies]
