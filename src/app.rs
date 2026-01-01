@@ -10,6 +10,7 @@ use crate::capture::{RectPx, RgbaImage, capture_region};
 enum Mode {
     Idle,
     Selecting { start: Pos2, end: Pos2 },
+    Selected { rect: Rect },
     PendingCapture { rect_px: RectPx, hidden_at: Instant },
 }
 
@@ -17,6 +18,7 @@ pub struct App {
     mode: Mode,
     screenshot: Option<RgbaImage>,
     texture: Option<egui::TextureHandle>,
+    image_loaders_installed: bool,
 }
 
 impl Default for App {
@@ -25,6 +27,7 @@ impl Default for App {
             mode: Mode::Idle,
             screenshot: None,
             texture: None,
+            image_loaders_installed: false,
         }
     }
 }
@@ -36,6 +39,7 @@ fn image_to_texture(ctx: &egui::Context, img: &RgbaImage) -> egui::TextureHandle
     ctx.load_texture("shot", color, Default::default())
 }
 
+/// min/max 分开换算像素，再相减，避免 round(width*ppp) 变大
 fn points_rect_to_px(ctx: &egui::Context, r: Rect) -> RectPx {
     let ppp = ctx.pixels_per_point();
 
@@ -52,6 +56,7 @@ fn points_rect_to_px(ctx: &egui::Context, r: Rect) -> RectPx {
     }
 }
 
+/// 暗幕“挖洞”：只画选区外 4 块暗幕，选区内=桌面原亮度
 fn paint_dim_with_hole(p: &egui::Painter, full: Rect, hole: Rect, alpha: u8) {
     let hole = hole.intersect(full);
     let dim = Color32::from_black_alpha(alpha);
@@ -95,20 +100,22 @@ fn paint_dim_with_hole(p: &egui::Painter, full: Rect, hole: Rect, alpha: u8) {
 
 impl App {
     const DIM_ALPHA: u8 = 120;
+    const CAPTURE_DELAY_MS: u64 = 180;
 
     fn enter_overlay(&mut self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
-        ctx.send_viewport_cmd(ViewportCommand::Fullscreen(true));
+
+        ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::AlwaysOnTop));
         ctx.send_viewport_cmd(ViewportCommand::Focus);
         ctx.request_repaint();
     }
 
     fn exit_overlay(&mut self, ctx: &egui::Context) {
-        ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
+        ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
         ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::Normal));
-        ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+
         ctx.request_repaint();
     }
 
@@ -146,7 +153,7 @@ impl App {
         });
     }
 
-    fn overlay_ui(&mut self, ctx: &egui::Context) {
+    fn overlay_selecting_ui(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ctx, |ui| {
@@ -173,81 +180,193 @@ impl App {
                     ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
                 }
 
-                if let Mode::Selecting { start, end } = &mut self.mode {
-                    if pressed && let Some(p) = pos {
-                        *start = p;
-                        *end = p;
-                    }
+                let (mut start, mut end) = match self.mode {
+                    Mode::Selecting { start, end } => (start, end),
+                    _ => return,
+                };
 
-                    if down && let Some(p) = pos {
-                        *end = p;
+                if pressed && let Some(p) = pos {
+                    start = p;
+                    end = p;
+                }
+                if down && let Some(p) = pos {
+                    end = p;
+                    ctx.request_repaint();
+                }
+
+                if released && let Some(p) = pos {
+                    end = p;
+                }
+
+                let min = Pos2::new(start.x.min(end.x), start.y.min(end.y));
+                let max = Pos2::new(start.x.max(end.x), start.y.max(end.y));
+                let sel = Rect::from_min_max(min, max).intersect(full);
+
+                let painter = ui.painter_at(full);
+                if sel.width() > 1.0 && sel.height() > 1.0 {
+                    paint_dim_with_hole(&painter, full, sel, Self::DIM_ALPHA);
+                    painter.rect_stroke(
+                        sel,
+                        0.0,
+                        Stroke::new(2.0, Color32::WHITE),
+                        StrokeKind::Inside,
+                    );
+                } else {
+                    painter.rect_filled(full, 0.0, Color32::from_black_alpha(Self::DIM_ALPHA));
+                }
+
+                painter.text(
+                    full.center_top() + Vec2::new(0.0, 12.0),
+                    egui::Align2::CENTER_TOP,
+                    "Drag to select. Release to continue. Esc to cancel.",
+                    egui::FontId::proportional(16.0),
+                    Color32::WHITE,
+                );
+
+                // 最后写回状态
+                if released {
+                    if sel.width() < 2.0 || sel.height() < 2.0 {
+                        self.mode = Mode::Idle;
+                        self.exit_overlay(ctx);
+                    } else {
+                        self.mode = Mode::Selected { rect: sel };
                         ctx.request_repaint();
                     }
-
-                    if released {
-                        let min = Pos2::new(start.x.min(end.x), start.y.min(end.y));
-                        let max = Pos2::new(start.x.max(end.x), start.y.max(end.y));
-                        let sel = Rect::from_min_max(min, max).intersect(full);
-
-                        if sel.width() < 2.0 || sel.height() < 2.0 {
-                            self.mode = Mode::Idle;
-                            self.exit_overlay(ctx);
-                            return;
-                        }
-
-                        let rect_px = points_rect_to_px(ctx, sel);
-
-                        // 先隐藏 overlay，避免把暗幕/边框截进去
-                        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
-                        ctx.request_repaint_after(Duration::from_millis(160));
-
-                        self.mode = Mode::PendingCapture {
-                            rect_px,
-                            hidden_at: Instant::now(),
-                        };
-                        return;
-                    }
-
-                    // 绘制：暗幕挖洞 + 边框
-                    let painter = ui.painter_at(full);
-
-                    let min = Pos2::new(start.x.min(end.x), start.y.min(end.y));
-                    let max = Pos2::new(start.x.max(end.x), start.y.max(end.y));
-                    let sel = Rect::from_min_max(min, max).intersect(full);
-
-                    if sel.width() > 1.0 && sel.height() > 1.0 {
-                        paint_dim_with_hole(&painter, full, sel, Self::DIM_ALPHA);
-
-                        painter.rect_stroke(
-                            sel,
-                            0.0,
-                            Stroke::new(2.0, Color32::WHITE),
-                            StrokeKind::Inside,
-                        );
-                    } else {
-                        painter.rect_filled(full, 0.0, Color32::from_black_alpha(Self::DIM_ALPHA));
-                    }
-
-                    painter.text(
-                        full.center_top() + Vec2::new(0.0, 12.0),
-                        egui::Align2::CENTER_TOP,
-                        "Drag to select. Release to capture. Esc to cancel.",
-                        egui::FontId::proportional(16.0),
-                        Color32::WHITE,
-                    );
+                } else {
+                    self.mode = Mode::Selecting { start, end };
                 }
+            });
+    }
+
+    fn overlay_selected_ui(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ctx, |ui| {
+                let full = ui.max_rect();
+
+                let rect = match self.mode {
+                    Mode::Selected { rect } => rect,
+                    _ => return,
+                };
+
+                // Esc = 取消
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.mode = Mode::Idle;
+                    self.exit_overlay(ctx);
+                    return;
+                }
+
+                // 背景暗幕 + 边框
+                let painter = ui.painter_at(full);
+                paint_dim_with_hole(&painter, full, rect, Self::DIM_ALPHA);
+                painter.rect_stroke(
+                    rect,
+                    0.0,
+                    Stroke::new(2.0, Color32::WHITE),
+                    StrokeKind::Inside,
+                );
+
+                // 工具栏：默认放 = 选区下方居中；如果靠近底部，就放到选区上方
+                let btn_size = Vec2::new(32.0, 32.0);
+                let spacing = 8.0;
+
+                let toolbar_width = btn_size.x * 3.0 + spacing * 2.0 + 16.0;
+                let toolbar_height = btn_size.y + 12.0;
+
+                let mut toolbar_center =
+                    Pos2::new(rect.center().x, rect.max.y + 8.0 + toolbar_height / 2.0);
+                if toolbar_center.y + toolbar_height / 2.0 > full.max.y - 8.0 {
+                    // 放上面
+                    toolbar_center.y = rect.min.y - 8.0 - toolbar_height / 2.0;
+                }
+
+                // clamp 到屏幕内（避免瞬移/抖动）
+                toolbar_center.x = toolbar_center.x.clamp(
+                    full.min.x + toolbar_width / 2.0 + 8.0,
+                    full.max.x - toolbar_width / 2.0 - 8.0,
+                );
+                toolbar_center.y = toolbar_center.y.clamp(
+                    full.min.y + toolbar_height / 2.0 + 8.0,
+                    full.max.y - toolbar_height / 2.0 - 8.0,
+                );
+
+                let toolbar_rect = Rect::from_center_size(
+                    toolbar_center,
+                    Vec2::new(toolbar_width, toolbar_height),
+                );
+                painter.rect_filled(toolbar_rect, 6.0, Color32::from_rgb(240, 240, 240));
+
+                let btn_center_y = toolbar_rect.center().y;
+                let cx = toolbar_rect.center().x;
+
+                // cancel
+                let cancel_rect = Rect::from_center_size(
+                    Pos2::new(cx - btn_size.x - spacing, btn_center_y),
+                    btn_size,
+                );
+                let cancel_img =
+                    egui::Image::new(egui::include_image!("../assets/icons/close.png"))
+                        .fit_to_exact_size(btn_size);
+
+                if ui
+                    .put(cancel_rect, cancel_img.sense(Sense::click()))
+                    .clicked()
+                {
+                    self.mode = Mode::Idle;
+                    self.exit_overlay(ctx);
+                    return;
+                }
+
+                // confirm
+                let confirm_rect = Rect::from_center_size(Pos2::new(cx, btn_center_y), btn_size);
+                let check_img = egui::Image::new(egui::include_image!("../assets/icons/check.png"))
+                    .fit_to_exact_size(btn_size);
+
+                if ui
+                    .put(confirm_rect, check_img.sense(Sense::click()))
+                    .clicked()
+                {
+                    let rect_px = points_rect_to_px(ctx, rect);
+
+                    self.mode = Mode::PendingCapture {
+                        rect_px,
+                        hidden_at: Instant::now(),
+                    };
+                    ctx.request_repaint();
+                    return;
+                }
+
+                // arrow（占位）
+                let arrow_rect = Rect::from_center_size(
+                    Pos2::new(cx + btn_size.x + spacing, btn_center_y),
+                    btn_size,
+                );
+                let arrow_img = egui::Image::new(egui::include_image!("../assets/icons/arrow.png"))
+                    .fit_to_exact_size(btn_size);
+                ui.put(arrow_rect, arrow_img.sense(Sense::click()));
             });
     }
 }
 
 impl eframe::App for App {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        // overlay “洞”里要跟桌面一样亮，这里必须全透明
         [0.0, 0.0, 0.0, 0.0]
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // loaders 只装一次
+        if !self.image_loaders_installed {
+            egui_extras::install_image_loaders(ctx);
+            self.image_loaders_installed = true;
+        }
+
+        // PendingCapture：这一段期间不画任何东西（全透明窗口），等合成器刷新后截图
         if let Mode::PendingCapture { rect_px, hidden_at } = self.mode {
-            if hidden_at.elapsed() < Duration::from_millis(160) {
+            // 驱动帧循环
+            ctx.request_repaint_after(Duration::from_millis(16));
+
+            if hidden_at.elapsed() < Duration::from_millis(Self::CAPTURE_DELAY_MS) {
                 return;
             }
 
@@ -266,7 +385,8 @@ impl eframe::App for App {
 
         match self.mode {
             Mode::Idle => self.idle_ui(ctx),
-            Mode::Selecting { .. } => self.overlay_ui(ctx),
+            Mode::Selecting { .. } => self.overlay_selecting_ui(ctx),
+            Mode::Selected { .. } => self.overlay_selected_ui(ctx),
             Mode::PendingCapture { .. } => {}
         }
     }
