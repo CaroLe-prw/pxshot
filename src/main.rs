@@ -1,7 +1,5 @@
 use eframe::egui;
-
-mod app;
-mod capture;
+use pxshot::App;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -16,6 +14,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "pxshot",
         options,
-        Box::new(|_cc| Ok(Box::new(app::App::default()))),
+        Box::new(|_cc| Ok(Box::new(App::default()))),
     )
 }
