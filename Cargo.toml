@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 image = { version = "0.25.9", default-features = false, features = ["png"] }
+imageproc = "0.25"
 anyhow = "1.0.100"
 eframe = "0.33.3"
 egui_extras = { version = "0.33.3", features = ["all_loaders"] }

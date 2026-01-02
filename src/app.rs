@@ -6,6 +6,7 @@ use std::time::Duration;
 use crate::capture::{RgbaImage, capture_region};
 use crate::clipboard;
 use crate::mode::Mode;
+use crate::tools::arrow::{ArrowDrawer, ArrowToolPanel};
 
 #[derive(Default)]
 pub struct App {
@@ -13,6 +14,12 @@ pub struct App {
     pub(crate) screenshot: Option<RgbaImage>,
     pub(crate) texture: Option<egui::TextureHandle>,
     image_loaders_installed: bool,
+    // Arrow 工具面板
+    pub(crate) arrow_panel: ArrowToolPanel,
+    pub(crate) show_arrow_panel: bool,
+    // Arrow 绘制器
+    pub(crate) arrow_drawer: ArrowDrawer,
+    pub(crate) arrow_mode_active: bool,
 }
 
 fn image_to_texture(ctx: &egui::Context, img: &RgbaImage) -> egui::TextureHandle {
@@ -100,7 +107,11 @@ impl eframe::App for App {
             Mode::Idle => self.idle_ui(ctx),
             Mode::Selecting { .. } => self.overlay_selecting_ui(ctx),
             Mode::Selected { .. } => self.overlay_selected_ui(ctx),
-            Mode::PendingCapture { rect_px, hidden_at } => {
+            Mode::PendingCapture {
+                rect_px,
+                rect_points,
+                hidden_at,
+            } => {
                 // 驱动帧循环
                 ctx.request_repaint_after(Duration::from_millis(16));
 
@@ -109,7 +120,17 @@ impl eframe::App for App {
                 }
 
                 match capture_region(rect_px) {
-                    Ok(img) => {
+                    Ok(mut img) => {
+                        // 渲染箭头到图像上
+                        if self.arrow_drawer.has_arrows() {
+                            let ppp = ctx.pixels_per_point();
+                            // 选区左上角的逻辑坐标
+                            let offset_x = rect_points.min.x;
+                            let offset_y = rect_points.min.y;
+                            self.arrow_drawer
+                                .render_all_to_image(&mut img, offset_x, offset_y, ppp);
+                        }
+
                         if let Err(e) = clipboard::copy_image(&img) {
                             eprintln!("copy to clipboard failed: {e}");
                         }
@@ -118,6 +139,12 @@ impl eframe::App for App {
                     }
                     Err(e) => eprintln!("capture failed: {e:?}"),
                 }
+
+                // 清理箭头状态
+                self.arrow_drawer.arrows.clear();
+                self.arrow_drawer.state = crate::tools::arrow::DrawState::Idle;
+                self.arrow_mode_active = false;
+                self.show_arrow_panel = false;
 
                 self.mode = Mode::Idle;
                 self.exit_overlay(ctx);
