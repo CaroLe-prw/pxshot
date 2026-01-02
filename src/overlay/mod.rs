@@ -8,8 +8,10 @@ use eframe::egui::{self, Color32, Pos2, Rect};
 pub use resize::HitZone;
 pub const DIM_ALPHA: u8 = 120;
 
-/// 只画选区外 4 块暗幕，选区内=桌面原亮度
+/// 使用单一 Mesh 绘制带洞的暗幕，避免多块分离导致的不同步消失
 pub fn paint_dim_with_hole(p: &egui::Painter, full: Rect, hole: Rect, alpha: u8) {
+    use egui::epaint::{Mesh, Vertex};
+
     let hole = hole.intersect(full);
     let dim = Color32::from_black_alpha(alpha);
 
@@ -18,53 +20,78 @@ pub fn paint_dim_with_hole(p: &egui::Painter, full: Rect, hole: Rect, alpha: u8)
         return;
     }
 
-    // 上
-    p.rect_filled(
-        Rect::from_min_max(full.min, Pos2::new(full.max.x, hole.min.y)),
-        0.0,
-        dim,
-    );
-    // 下
-    p.rect_filled(
-        Rect::from_min_max(Pos2::new(full.min.x, hole.max.y), full.max),
-        0.0,
-        dim,
-    );
-    // 左
-    p.rect_filled(
-        Rect::from_min_max(
-            Pos2::new(full.min.x, hole.min.y),
-            Pos2::new(hole.min.x, hole.max.y),
-        ),
-        0.0,
-        dim,
-    );
-    // 右
-    p.rect_filled(
-        Rect::from_min_max(
-            Pos2::new(hole.max.x, hole.min.y),
-            Pos2::new(full.max.x, hole.max.y),
-        ),
-        0.0,
-        dim,
-    );
+    // 构建单一带洞的 Mesh：外框 4 顶点 + 内框 4 顶点
+    // 使用三角形带连接外框和内框，形成一个整体的"相框"形状
+    let mut mesh = Mesh::default();
+    let uv = egui::epaint::WHITE_UV;
+
+    // 外框顶点 (0-3)
+    mesh.vertices.push(Vertex {
+        pos: full.left_top(),
+        uv,
+        color: dim,
+    }); // 0
+    mesh.vertices.push(Vertex {
+        pos: full.right_top(),
+        uv,
+        color: dim,
+    }); // 1
+    mesh.vertices.push(Vertex {
+        pos: full.right_bottom(),
+        uv,
+        color: dim,
+    }); // 2
+    mesh.vertices.push(Vertex {
+        pos: full.left_bottom(),
+        uv,
+        color: dim,
+    }); // 3
+
+    // 内框顶点 (4-7)
+    mesh.vertices.push(Vertex {
+        pos: hole.left_top(),
+        uv,
+        color: dim,
+    }); // 4
+    mesh.vertices.push(Vertex {
+        pos: hole.right_top(),
+        uv,
+        color: dim,
+    }); // 5
+    mesh.vertices.push(Vertex {
+        pos: hole.right_bottom(),
+        uv,
+        color: dim,
+    }); // 6
+    mesh.vertices.push(Vertex {
+        pos: hole.left_bottom(),
+        uv,
+        color: dim,
+    }); // 7
+
+    // 用三角形连接外框和内框的对应边，形成 4 个梯形区域
+    // 上边区域：0-1-5-4
+    mesh.indices.extend_from_slice(&[0, 1, 5, 0, 5, 4]);
+    // 右边区域：1-2-6-5
+    mesh.indices.extend_from_slice(&[1, 2, 6, 1, 6, 5]);
+    // 下边区域：2-3-7-6
+    mesh.indices.extend_from_slice(&[2, 3, 7, 2, 7, 6]);
+    // 左边区域：3-0-4-7
+    mesh.indices.extend_from_slice(&[3, 0, 4, 3, 4, 7]);
+
+    p.add(egui::Shape::mesh(mesh));
 }
 
 /// 获取选择框的size
 pub fn points_rect_to_px(ctx: &egui::Context, r: Rect) -> RectPx {
     let ppp = ctx.pixels_per_point();
 
-    let x1 = (r.min.x * ppp).floor().max(0.0) as i32;
-    let y1 = (r.min.y * ppp).floor().max(0.0) as i32;
-    let x2 = (r.max.x * ppp).ceil().max(0.0) as i32;
-    let y2 = (r.max.y * ppp).ceil().max(0.0) as i32;
+    let x = (r.min.x * ppp).round().max(0.0) as u32;
+    let y = (r.min.y * ppp).round().max(0.0) as u32;
+    let w = (r.width() * ppp).round().max(1.0) as u32;
+    let h = (r.height() * ppp).round().max(1.0) as u32;
 
-    RectPx {
-        x: x1.max(0) as u32,
-        y: y1.max(0) as u32,
-        w: (x2 - x1).max(1) as u32,
-        h: (y2 - y1).max(1) as u32,
-    }
+    RectPx { x, y, w, h }
 }
 
 /// 绘制选区尺寸标签

@@ -64,6 +64,29 @@ impl HitZone {
             HitZone::Inside => {
                 min += delta;
                 max += delta;
+
+                if min.x < screen.min.x {
+                    let adjust = screen.min.x - min.x;
+                    min.x += adjust;
+                    max.x += adjust;
+                }
+                if max.x > screen.max.x {
+                    let adjust = max.x - screen.max.x;
+                    min.x -= adjust;
+                    max.x -= adjust;
+                }
+                if min.y < screen.min.y {
+                    let adjust = screen.min.y - min.y;
+                    min.y += adjust;
+                    max.y += adjust;
+                }
+                if max.y > screen.max.y {
+                    let adjust = max.y - screen.max.y;
+                    min.y -= adjust;
+                    max.y -= adjust;
+                }
+
+                return Rect::from_min_max(min, max);
             }
             HitZone::TopLeft => {
                 min += delta;
@@ -94,7 +117,7 @@ impl HitZone {
             HitZone::None => {}
         }
 
-        // 确保 min < max
+        // 确保 min < max（仅用于调整大小操作）
         if min.x > max.x {
             std::mem::swap(&mut min.x, &mut max.x);
         }
@@ -102,7 +125,7 @@ impl HitZone {
             std::mem::swap(&mut min.y, &mut max.y);
         }
 
-        // 限制在屏幕内
+        // 限制在屏幕内（调整大小时可以裁剪）
         Rect::from_min_max(min, max).intersect(screen)
     }
 }

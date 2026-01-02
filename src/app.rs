@@ -23,7 +23,7 @@ fn image_to_texture(ctx: &egui::Context, img: &RgbaImage) -> egui::TextureHandle
 }
 
 impl App {
-    const CAPTURE_DELAY_MS: u64 = 180;
+    const CAPTURE_DELAY_MS: u64 = 300;
 
     pub fn enter_overlay(&mut self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
